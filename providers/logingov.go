@@ -7,13 +7,13 @@ import (
 	"crypto/rsa"
 	"fmt"
 	"math/big"
+	"net/http"
 	"net/url"
 	"time"
 
 	"github.com/golang-jwt/jwt"
 	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/apis/sessions"
 	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/requests"
-	"gopkg.in/square/go-jose.v2"
 )
 
 // LoginGovProvider represents an OIDC based Identity Provider
@@ -22,7 +22,6 @@ type LoginGovProvider struct {
 
 	// TODO (@timothy-spencer): Ideally, the nonce would be in the session state, but the session state
 	// is created only upon code redemption, not during the auth, when this must be supplied.
-	Nonce     string
 	JWTKey    *rsa.PrivateKey
 	PubJWKURL *url.URL
 }
@@ -89,43 +88,7 @@ func NewLoginGovProvider(p *ProviderData) *LoginGovProvider {
 	})
 	return &LoginGovProvider{
 		ProviderData: p,
-		Nonce:        randSeq(32),
 	}
-}
-
-type loginGovCustomClaims struct {
-	Acr           string `json:"acr"`
-	Nonce         string `json:"nonce"`
-	Email         string `json:"email"`
-	EmailVerified bool   `json:"email_verified"`
-	GivenName     string `json:"given_name"`
-	FamilyName    string `json:"family_name"`
-	Birthdate     string `json:"birthdate"`
-	AtHash        string `json:"at_hash"`
-	CHash         string `json:"c_hash"`
-	jwt.StandardClaims
-}
-
-// checkNonce checks the nonce in the id_token
-func checkNonce(idToken string, p *LoginGovProvider) (err error) {
-	token, err := jwt.ParseWithClaims(idToken, &loginGovCustomClaims{}, func(token *jwt.Token) (interface{}, error) {
-		var pubkeys jose.JSONWebKeySet
-		rerr := requests.New(p.PubJWKURL.String()).Do().UnmarshalInto(&pubkeys)
-		if rerr != nil {
-			return nil, rerr
-		}
-		return pubkeys.Keys[0].Key, nil
-	})
-	if err != nil {
-		return
-	}
-
-	claims := token.Claims.(*loginGovCustomClaims)
-	if claims.Nonce != p.Nonce {
-		err = fmt.Errorf("nonce validation failed")
-		return
-	}
-	return
 }
 
 func emailFromUserInfo(ctx context.Context, accessToken string, userInfoEndpoint string) (string, error) {
@@ -158,8 +121,13 @@ func emailFromUserInfo(ctx context.Context, accessToken string, userInfoEndpoint
 	return email, nil
 }
 
+func (p *LoginGovProvider) ValidateSession(ctx context.Context, s *sessions.SessionState) bool {
+	return validateToken(ctx, p, s.AccessToken, http.Header{"Authorization": []string{"Bearer "+s.AccessToken},})
+}
+
+
 // Redeem exchanges the OAuth2 authentication token for an ID token
-func (p *LoginGovProvider) Redeem(ctx context.Context, _, code string) (*sessions.SessionState, error) {
+func (p *LoginGovProvider) Redeem(ctx context.Context, redirect_uri, code string) (*sessions.SessionState, error) {
 	if code == "" {
 		return nil, ErrMissingCode
 	}
@@ -182,6 +150,7 @@ func (p *LoginGovProvider) Redeem(ctx context.Context, _, code string) (*session
 	params.Add("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer")
 	params.Add("code", code)
 	params.Add("grant_type", "authorization_code")
+	params.Add("redirect_uri", redirect_uri)
 
 	// Get the token from the body that we got from the token endpoint.
 	var jsonResponse struct {
@@ -197,12 +166,6 @@ func (p *LoginGovProvider) Redeem(ctx context.Context, _, code string) (*session
 		SetHeader("Content-Type", "application/x-www-form-urlencoded").
 		Do().
 		UnmarshalInto(&jsonResponse)
-	if err != nil {
-		return nil, err
-	}
-
-	// check nonce here
-	err = checkNonce(jsonResponse.IDToken, p)
 	if err != nil {
 		return nil, err
 	}
@@ -224,16 +187,4 @@ func (p *LoginGovProvider) Redeem(ctx context.Context, _, code string) (*session
 	session.ExpiresIn(time.Duration(jsonResponse.ExpiresIn) * time.Second)
 
 	return session, nil
-}
-
-// GetLoginURL overrides GetLoginURL to add login.gov parameters
-func (p *LoginGovProvider) GetLoginURL(redirectURI, state, _ string) string {
-	extraParams := url.Values{}
-	if p.AcrValues == "" {
-		acr := "http://idmanagement.gov/ns/assurance/loa/1"
-		extraParams.Add("acr_values", acr)
-	}
-	extraParams.Add("nonce", p.Nonce)
-	a := makeLoginURL(p.ProviderData, redirectURI, state, extraParams)
-	return a.String()
 }
