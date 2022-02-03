@@ -2,9 +2,9 @@ package providers
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/url"
+	"strconv"
 
 	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/apis/sessions"
 	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/logger"
@@ -24,7 +24,6 @@ const (
 )
 
 var (
-	errKuEmptyId = errors.New("empty id received")
 
 	// Default Login URL for Ku.
 	// Pre-parsed URL of https://ku.org/oauth/authorize.
@@ -83,16 +82,12 @@ func (p *KuProvider) EnrichSession(ctx context.Context, s *sessions.SessionState
 		return err
 	}
 
-	email, err := json.GetPath("data", "id").String()
+	email, err := json.GetPath("data", "id").Int()
 	if err != nil {
 		return fmt.Errorf("unable to extract id from userinfo endpoint: %w", err)
 	}
 
-	if email == "" {
-		return errKuEmptyId
-	}
-
-	s.Email = email
+	s.Email = strconv.Itoa(email)
 
 	return nil
 }
